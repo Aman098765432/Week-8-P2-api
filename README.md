@@ -1,172 +1,89 @@
-\# Project 2 API: Surface Defect Classifier + Inspection Note Analyzer
+# Week 8: Plant Leaf Disease API (FastAPI)
 
+This folder serves my Week 6 leaf-disease image model and my Week 7 text evidence as a web service.
 
+## What it does
 
-A FastAPI service that serves my Week 6 image model (ResNet18 on the NEU surface defect dataset, 6 classes) together with a text-evidence step that masks personal data in an inspector's note and decides REFER or ROUTINE.
+| Endpoint | Input | Output |
+|---|---|---|
+| `GET /health` | none | status, model loaded, classes (`diseased`, `healthy`), positive class |
+| `POST /predict` | leaf image (JPEG or PNG) | label, class probabilities, latency in ms |
+| `POST /analyze` | leaf image + a field note | masked note, extracted fields, urgent words, decision (`REFER` or `ROUTINE`) with reasons |
 
+`/analyze` masks the CNIC, phone number and email in the note **before** any extraction, so no personal identifier appears anywhere in the response. A `REFER` decision is raised when the image model gives P(diseased) of at least 0.5 or the note mentions a warning word such as spreading, blight, wilting or yellow.
 
+Error handling (no stack traces): wrong file type returns **415**, a file over 5 MB returns **413**, a corrupt image returns **400**, and a missing file or a note over 2,000 characters returns **422**.
 
-\## How to run
+## Files
 
+- `app.py`: the API
+- `test_api.py`: 8 automated tests
+- `bench.py`: latency benchmark
+- `requirements.txt`: packages
+- `sample.jpeg`: a test leaf image (tomato late blight)
+- `week6_model.pt`: **not stored here** (44 MB). Copy the trained model from Week 6 into this folder before running.
 
+## How to run
 
 ```
-
-python -m venv C:\\p2env
-
-C:\\p2env\\Scripts\\activate
-
+cd api
+python -m venv .venv
+.venv\Scripts\activate
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-
-pip install fastapi uvicorn python-multipart pillow pytest httpx numpy
-
+pip install -r requirements.txt
 uvicorn app:app
-
 ```
 
-
-
-Then open http://127.0.0.1:8000/docs and use "Try it out".
-
-
-
-\## Settings (in app.py)
-
-
-
-\- MODEL\_PATH: week6\_model.pt
-
-\- POSITIVE (class I must not miss): inclusion (the weakest class in Week 6, recall 0.983)
-
-\- THRESHOLD: 0.5
-
-\- URGENT words: crack, fracture, corrosion, spreading, severe, deep
-
-\- Upload limit: 5 MB; note limit: 2,000 characters
-
-
-
-\## API usage
-
-
-
-| Endpoint | What it does |
-
-|----------|--------------|
-
-| GET /health | Shows the service is up, model loaded, the 6 classes and the POSITIVE class |
-
-| POST /predict | Upload a JPEG or PNG; returns label, probabilities, latency\_ms |
-
-| POST /analyze | Upload an image plus a note; returns prediction, masked note, urgent terms, decision, reasons, disclaimer |
-
-
-
-Example calls:
-
-
+Open http://127.0.0.1:8000/docs and use "Try it out", or call it with curl:
 
 ```
-
 curl -X POST http://127.0.0.1:8000/predict -F "file=@sample.jpeg;type=image/jpeg"
 
-curl -X POST http://127.0.0.1:8000/analyze -F "file=@sample.jpeg;type=image/jpeg" -F "note=Visible crack spreading near the edge. Guardian 0300-1234567"
-
+curl -X POST http://127.0.0.1:8000/analyze -F "file=@sample.jpeg;type=image/jpeg" -F "note=Brown patches spreading on tomato leaves. Call 0300-1234567"
 ```
 
+On Mac or Linux activate with `source .venv/bin/activate` and continue lines with `\` instead of `^`.
 
+## Tests
 
-Example result for /predict on sample.jpeg (scratches\_257.jpg from the validation set): label = scratches, P(scratches) = 0.9794.
+`pytest -q test_api.py` gave **8 passed**. The tests cover the health check, the response schema and probabilities, parity with calling the model directly, rejection of a wrong type (415), an oversized file (413), a corrupt image (400), a missing file (422), and a PII test that fails if any part of the phone number or CNIC appears in the `/analyze` response.
 
+![pytest output](pytest.png)
 
+A successful prediction and a rejected input:
 
-Example result for /analyze: the phone number and CNIC in the note came back as \[PHONE] and \[CNIC], urgent\_terms = crack, spreading, decision = REFER.
+![predict](predict.png)
+![415 response](rejected-415.png)
 
+## Benchmark
 
+50 requests to `/predict` against a running server, on [CPU model] with [RAM] GB RAM, CPU only, one worker:
 
-\## Error handling
+| p50 | p95 | max | throughput |
+|---|---|---|---|
+| 45 ms | 70 ms | 206 ms | about 19.5 requests/s |
 
+The maximum comes from the first request, while the model is still warming up.
 
+![benchmark](bench.png)
 
-| Bad input | Status | Response |
+### Capacity (Little's law)
 
-|-----------|--------|----------|
+At p50 = 45 ms one request takes 0.045 s, so one worker can handle 1 / 0.045 = 22.2 requests per second. Over a day this is 22.2 x 86,400 = about 1.92 million requests at full load. A busy server should not run at 100%, so at 65% utilisation I would plan for about 1.2 million requests per day per worker.
 
-| Text file instead of image | 415 | Upload a JPEG or PNG image |
+## An extra bad input
 
-| Image over 5 MB | 413 | Image larger than 5 MB |
+[Write what you tried and what the API returned. Example: I sent a 3,000-character note to `/analyze`; the API returned 422 "Note longer than 2,000 characters" with no stack trace.]
 
-| File that is not a readable image | 400 | File is not a readable image |
+## Check Your Understanding
 
-| Missing file field | 422 | validation error |
+1. **A PDF sent to /predict.** It should get **415 Unsupported Media Type**. The client sent the wrong kind of input, which is a client error (4xx). A 500 means a bug in the server, and it would hide a clear, fixable message behind a crash.
+2. **Why load the model in `lifespan`.** Loading the weights takes seconds and memory. Inside the endpoint it would repeat on every request. In `lifespan` it happens once at startup and all requests share the same model.
+3. **p50 = 40 ms and p95 = 400 ms.** A typical request is fast, but about 1 in 20 is ten times slower (a heavy tail). I would check for first-call warm-up, requests queuing behind each other, very large images, other programs using the CPU, and blocking code on the event loop.
+4. **Workers needed.** 500,000 / 86,400 = 5.8 requests/s on average. Peak is 5 times that, about 29 requests/s. With 25 requests/s per worker, 29 / 25 = 1.16, so **2 workers** (3 would leave a safety margin).
+5. **Inference inside `async def`.** Model inference is heavy CPU work that never hands control back. While it runs, the event loop cannot answer other requests, even a quick `/health`. Running it in a thread pool (`run_in_threadpool`) keeps the loop free.
+6. **Channels in a 4-person team.** n(n - 1) / 2 = 4 x 3 / 2 = **6**.
 
-| Note over 2,000 characters | 422 | Note longer than 2,000 characters |
+## Note
 
-
-
-None of these returns a stack trace.
-
-
-
-\## Tests
-
-
-
-`pytest -q test\_api.py` result:
-
-
-
-```
-
-8 passed, 1 warning in 21.52s
-
-```
-
-
-
-The tests cover health, schema and probabilities, parity with the direct model, wrong file type (415), too-large file (413), corrupt image (400), missing file (422) and no personal data leaking from /analyze. The one warning is a harmless httpx deprecation notice from the test client.
-
-
-
-\## Latency benchmark
-
-
-
-Hardware: Intel Core i5-8365U @ 1.60 GHz, 15.8 GB RAM, CPU only, 1 worker (Python 3.15.0, torch 2.15.0+cpu).
-
-
-
-`python bench.py` (50 requests to /predict): p50 = 94 ms, p95 = 100 ms, max = 323 ms, throughput about 10.2 requests/s.
-
-
-
-Little's law: with one worker at p50 = 94 ms, one worker handles about 1 / 0.094 = 10.6 requests/s, which is about 86,400 / 0.094 = 919,000 requests per day.
-
-
-
-\## Bad input beyond the tests
-
-
-
-I sent /analyze a note of 2,001 characters. The API returned HTTP 422 with the message "Note longer than 2,000 characters", with no crash. I also sent a 6 MB file (got 413) and a Python file labelled text/plain (got 415).
-
-
-
-\## Check your understanding
-
-
-
-1\. A PDF sent to /predict should get 415 (Unsupported Media Type). It is the client's mistake, so it must be a 4xx code. A 500 means a bug in the server, and here the server handles it on purpose without a stack trace.
-
-2\. Loading the model takes seconds and uses memory. If it were loaded inside the endpoint, every request would pay that cost. In lifespan it loads once at startup and all requests reuse it.
-
-3\. A median of 40 ms with a p95 of 400 ms means most requests are fast but a few are about 10 times slower. I would check the first request after startup, garbage collection, other programs using the CPU, queueing, and unusually large inputs.
-
-4\. 500,000 requests per day is about 5.8 per second on average. The peak is 5 times that, about 29 per second. At 25 per second per worker, 29 / 25 = 1.16, so I need 2 workers.
-
-5\. An async endpoint runs on a single event loop. Heavy model inference inside it blocks the loop, so other requests (even /health) have to wait. run\_in\_threadpool moves the heavy work to another thread.
-
-6\. A 4-person team has 4 x 3 / 2 = 6 communication channels.
-## What I learned
-
-My model is only useful as a product if it rejects bad input safely and is tested. My API now returns clean 415, 413, 400 and 422 errors with no stack trace, and 8 tests prove it. The biggest surprise was the async trap: heavy model code inside an async endpoint can block other requests, so I run it in a thread pool.
+Decision support only. A qualified agronomist makes the final call.
